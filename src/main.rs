@@ -31,6 +31,16 @@ const STDOUT: c_int = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct PollFd {
+    fd: c_int,
+    events: i16,
+    revents: i16,
+}
+
+const POLLIN: i16 = 0x001;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct Termios {
     c_iflag: u32,
     c_oflag: u32,
@@ -55,6 +65,7 @@ extern "C" {
     fn tcgetattr(fd: c_int, tp: *mut Termios) -> c_int;
     fn tcsetattr(fd: c_int, actions: c_int, tp: *const Termios) -> c_int;
     fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+    fn poll(fds: *mut PollFd, nfds: u64, timeout: c_int) -> c_int;
     fn read(fd: c_int, buf: *mut u8, count: usize) -> isize;
     fn write(fd: c_int, buf: *const u8, count: usize) -> isize;
 }
@@ -70,13 +81,17 @@ fn fd_write(bytes: &[u8]) {
 // ---------------------------------------------------------------------------
 
 static mut ORIG_TERMIOS: Option<Termios> = None;
+static mut IS_TTY: bool = false;
 
 fn enable_raw_mode() {
     let mut raw: Termios = unsafe { std::mem::zeroed() };
     if unsafe { tcgetattr(STDIN, &mut raw) } != 0 {
         return; // stdin is not a terminal (piped input) — carry on regardless
     }
-    unsafe { ORIG_TERMIOS = Some(raw) };
+    unsafe {
+        ORIG_TERMIOS = Some(raw);
+        IS_TTY = true;
+    }
 
     raw.c_iflag &= !(ICRNL | IXON);
     raw.c_oflag &= !(OPOST);
@@ -136,9 +151,11 @@ fn read_byte() -> Option<u8> {
         if n == 1 {
             return Some(b[0]);
         }
-        if n == 0 {
-            return None; // EOF (non-tty input exhausted)
+        if n == 0 && !unsafe { IS_TTY } {
+            return None; // EOF: piped input is exhausted
         }
+        // on a terminal a zero return just means "idle for 100 ms" — keep waiting,
+        // quitting must be an explicit Ctrl-Q, never a timeout
     }
 }
 
@@ -146,8 +163,13 @@ fn read_key() -> Option<Key> {
     let c = read_byte()?;
     match c {
         27 => {
-            let bracket = read_byte();
-            if bracket != Some(b'[') {
+            // a real escape sequence sends its bytes back-to-back; poll briefly
+            // so a lone Esc doesn't block waiting for bytes that never come
+            let mut pfd = PollFd { fd: STDIN, events: POLLIN, revents: 0 };
+            if unsafe { poll(&mut pfd, 1, 25) } <= 0 {
+                return Some(Key::Esc);
+            }
+            if read_byte() != Some(b'[') {
                 return Some(Key::Esc);
             }
             let code = read_byte();
