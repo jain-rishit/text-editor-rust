@@ -1,0 +1,8 @@
+[package]
+name = "rsedit"
+version = "0.1.0"
+edition = "2021"
+description = "A tiny TUI text editor for the terminal, written in pure Rust"
+license = "MIT"
+
+[dependencies]
