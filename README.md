@@ -28,6 +28,21 @@ cargo build --release        # binary lands in target/release/rsedit
 
 Everything else just types a character. Tabs are shown as 4 spaces.
 
+## Vim-inspired shortcuts
+
+`rsedit` stays modeless (you're always typing), but borrows a few motion
+and editing keys from vim/nvim so you can keep your hands on the keyboard:
+
+| Key | vim equivalent | Action |
+|---|---|---|
+| `Ctrl-←` / `Ctrl-→` | `b` / `w` | jump word backwards / forwards |
+| `Ctrl-A` / `Ctrl-E` | `0` / `$` | jump to start / end of line |
+| `Ctrl-B` / `Ctrl-F` | `^B` / `^F` | page up / page down |
+| `Ctrl-W` | `db` in insert mode | delete the word before the cursor |
+| `Ctrl-U` | insert-mode `^U` | delete back to start of line |
+| `Ctrl-K` | `d$` | delete to end of line |
+| `Ctrl-G` | `^G` | show file info (name, lines, column) |
+
 ## Notes
 
 - Linux only (uses `termios` + `ioctl(TIOCGWINSZ)` directly).

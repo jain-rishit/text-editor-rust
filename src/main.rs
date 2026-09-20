@@ -70,9 +70,13 @@ extern "C" {
     fn write(fd: c_int, buf: *const u8, count: usize) -> isize;
 }
 
-fn fd_write(bytes: &[u8]) {
-    unsafe {
-        write(STDOUT, bytes.as_ptr(), bytes.len());
+fn fd_write(mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        let n = unsafe { write(STDOUT, bytes.as_ptr(), bytes.len()) };
+        if n <= 0 {
+            return; // give up on a wedged terminal
+        }
+        bytes = &bytes[n as usize..];
     }
 }
 
@@ -139,8 +143,18 @@ enum Key {
     End,
     PageUp,
     PageDown,
+    WordLeft,
+    WordRight,
+    CtrlA,
+    CtrlB,
+    CtrlE,
+    CtrlF,
+    CtrlG,
+    CtrlK,
     CtrlQ,
     CtrlS,
+    CtrlU,
+    CtrlW,
     Esc,
 }
 
@@ -172,20 +186,43 @@ fn read_key() -> Option<Key> {
             if read_byte() != Some(b'[') {
                 return Some(Key::Esc);
             }
-            let code = read_byte();
-            match code {
+            // CSI sequences carry parameter bytes (digits, ';') before a final
+            // byte >= 0x40 — parse them so ctrl/alt+arrow are distinguishable
+            let mut params: Vec<u8> = Vec::new();
+            let mut b = read_byte();
+            while let Some(p) = b {
+                if p < 0x40 {
+                    params.push(p);
+                    b = read_byte();
+                } else {
+                    break;
+                }
+            }
+            match b {
                 Some(b'A') => Some(Key::ArrowUp),
                 Some(b'B') => Some(Key::ArrowDown),
-                Some(b'C') => Some(Key::ArrowRight),
-                Some(b'D') => Some(Key::ArrowLeft),
+                Some(b'C') => {
+                    if params.contains(&b'3') || params.contains(&b'5') {
+                        Some(Key::WordRight)
+                    } else {
+                        Some(Key::ArrowRight)
+                    }
+                }
+                Some(b'D') => {
+                    if params.contains(&b'3') || params.contains(&b'5') {
+                        Some(Key::WordLeft)
+                    } else {
+                        Some(Key::ArrowLeft)
+                    }
+                }
                 Some(b'H') => Some(Key::Home),
                 Some(b'F') => Some(Key::End),
-                Some(b'~') => match read_byte() {
-                    Some(b'3') => Some(Key::Delete),
-                    Some(b'5') => Some(Key::PageUp),
-                    Some(b'6') => Some(Key::PageDown),
-                    Some(b'1') | Some(b'7') => Some(Key::Home),
-                    Some(b'4') | Some(b'8') => Some(Key::End),
+                Some(b'~') => match params.as_slice() {
+                    [b'3'] => Some(Key::Delete),
+                    [b'5'] => Some(Key::PageUp),
+                    [b'6'] => Some(Key::PageDown),
+                    [b'1'] | [b'7'] => Some(Key::Home),
+                    [b'4'] | [b'8'] => Some(Key::End),
                     _ => Some(Key::Esc),
                 },
                 _ => Some(Key::Esc),
@@ -195,9 +232,17 @@ fn read_key() -> Option<Key> {
         13 => Some(Key::Enter),
         9 => Some(Key::Tab),
         v if v < 32 => match v {
-            17 => Some(Key::CtrlQ), // ^Q
-            19 => Some(Key::CtrlS), // ^S
-            _ => Some(Key::Esc),    // everything else (Ctrl-C etc.) is ignored
+            1 => Some(Key::CtrlA),
+            2 => Some(Key::CtrlB),
+            5 => Some(Key::CtrlE),
+            6 => Some(Key::CtrlF),
+            7 => Some(Key::CtrlG),
+            11 => Some(Key::CtrlK),
+            17 => Some(Key::CtrlQ),
+            19 => Some(Key::CtrlS),
+            21 => Some(Key::CtrlU),
+            23 => Some(Key::CtrlW),
+            _ => Some(Key::Esc),    // Ctrl-C and friends are no-ops
         },
         v => Some(Key::Char(v as char)),
     }
@@ -237,7 +282,7 @@ impl Editor {
             col_off: 0,
             screen_rows: h,
             screen_cols: w,
-            status_msg: String::from("Ctrl-S save  |  Ctrl-Q quit  |  arrows move"),
+            status_msg: String::from("Ctrl-S save  |  Ctrl-Q quit  |  Ctrl-G info"),
             quit_times: 0,
         }
     }
@@ -298,6 +343,18 @@ impl Editor {
         self.status_msg = msg;
     }
 
+    fn show_info(&mut self) {
+        let name = self.filename.as_deref().unwrap_or("[No Name]");
+        let dirty = if self.dirty { " (modified)" } else { "" };
+        self.set_status(format!(
+            "\"{}\" — {} lines, column {}{}",
+            name,
+            self.rows.len(),
+            self.cx + 1,
+            dirty
+        ));
+    }
+
     fn insert_char(&mut self, c: char) {
         self.rows.get_mut(self.cy).unwrap().insert(self.cx, c);
         self.cx += 1;
@@ -316,25 +373,27 @@ impl Editor {
         if self.cx > 0 {
             self.rows[self.cy].remove(self.cx - 1);
             self.cx -= 1;
+            self.dirty = true;
         } else if self.cy > 0 {
             let prev_len = self.rows[self.cy - 1].len();
             let tail = self.rows.remove(self.cy);
             self.rows[self.cy - 1].extend(tail);
             self.cy -= 1;
             self.cx = prev_len;
+            self.dirty = true;
         }
-        self.dirty = true;
     }
 
     fn delete(&mut self) {
         let row_len = self.rows[self.cy].len();
         if self.cx < row_len {
             self.rows[self.cy].remove(self.cx);
+            self.dirty = true;
         } else if self.cy + 1 < self.rows.len() {
             let next = self.rows.remove(self.cy + 1);
             self.rows[self.cy].extend(next);
+            self.dirty = true;
         }
-        self.dirty = true;
     }
 
     fn move_up(&mut self) {
@@ -376,6 +435,85 @@ impl Editor {
 
     fn end(&mut self) {
         self.cx = self.rows[self.cy].len();
+    }
+
+    fn word_next(&mut self) {
+        let row_len = self.rows[self.cy].len();
+        if self.cx >= row_len {
+            if self.cy + 1 < self.rows.len() {
+                self.cy += 1;
+                self.cx = 0;
+            }
+            return;
+        }
+        let chars = self.rows[self.cy].clone();
+        let mut i = self.cx;
+        while i < row_len && chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < row_len && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        while i < row_len && chars[i].is_whitespace() {
+            i += 1;
+        }
+        if i >= row_len && self.cy + 1 < self.rows.len() {
+            self.cy += 1;
+            self.cx = 0;
+        } else {
+            self.cx = i; // lands on the next word start, like vim 'w'
+        }
+    }
+
+    fn word_prev(&mut self) {
+        if self.cx == 0 {
+            if self.cy > 0 {
+                self.cy -= 1;
+                self.cx = self.rows[self.cy].len();
+            }
+            return;
+        }
+        let chars = self.rows[self.cy].clone();
+        let mut i = self.cx;
+        while i > 0 && chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        self.cx = i; // start of the previous word, like vim 'b'
+    }
+
+    fn delete_to_line_start(&mut self) {
+        if self.cx > 0 {
+            self.rows[self.cy].drain(..self.cx);
+            self.cx = 0;
+            self.dirty = true;
+        }
+    }
+
+    fn delete_to_line_end(&mut self) {
+        let row = &mut self.rows[self.cy];
+        if self.cx < row.len() {
+            row.truncate(self.cx);
+            self.dirty = true;
+        }
+    }
+
+    fn delete_word_back(&mut self) {
+        let line = &self.rows[self.cy];
+        let mut i = self.cx;
+        while i > 0 && line[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        while i > 0 && !line[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        if i < self.cx {
+            self.rows[self.cy].drain(i..self.cx);
+            self.cx = i;
+            self.dirty = true;
+        }
     }
 
     fn page_up(&mut self) {
@@ -497,6 +635,16 @@ impl Editor {
             Key::End => self.end(),
             Key::PageUp => self.page_up(),
             Key::PageDown => self.page_down(),
+            Key::WordLeft => self.word_prev(),
+            Key::WordRight => self.word_next(),
+            Key::CtrlA => self.home(),
+            Key::CtrlE => self.end(),
+            Key::CtrlB => self.page_up(),
+            Key::CtrlF => self.page_down(),
+            Key::CtrlK => self.delete_to_line_end(),
+            Key::CtrlU => self.delete_to_line_start(),
+            Key::CtrlW => self.delete_word_back(),
+            Key::CtrlG => self.show_info(),
             Key::CtrlS => self.save(),
             Key::CtrlQ => {
                 if self.dirty && self.quit_times < 1 {
