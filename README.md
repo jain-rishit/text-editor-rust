@@ -49,6 +49,16 @@ and editing keys from vim/nvim so you can keep your hands on the keyboard:
 - Missing files open as a new buffer and are created on first save.
 - With no filename, the first save writes to `untitled.txt`.
 
+## Code layout
+
+```text
+src/
+├── main.rs     entry point + wiring
+├── tty.rs      raw terminal mode, screen size, byte-level I/O
+├── input.rs    key press handling (escape sequences included)
+└── editor.rs   buffer, cursor, rendering, editing operations
+```
+
 ## License
 
 MIT
